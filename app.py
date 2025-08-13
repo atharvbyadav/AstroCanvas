@@ -1,28 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Streamlit App: Whole Sign / Placidus Natal Chart with Wheel + Aspect Lines
+AstroCanvas — Maharashtra Edition (Multilanguage)
 
-Features
-- Interactive inputs (date, time, tz, lat, lon, house system, orbs, toggles)
-- Live chart rendering with aspect lines
-- Retrograde marking
-- Planet positions table (sign/deg/min, retrograde)
-- Download buttons (PNG chart, CSV & JSON positions)
+This file is the Maharashtra-first Streamlit app with multilingual support (English, Marathi, Hindi)
+and automatic language detection (browser param -> IP region fallback -> Marathi default).
 
-Requirements
-    pip install streamlit pyswisseph matplotlib pandas
+Run:
+    pip install streamlit pyswisseph matplotlib pandas timezonefinder pytz geopy requests
+    streamlit run astrocanvas_maharashtra.py
 
-Run
-    streamlit run app.py
-
-Note
-- This app uses a numeric timezone offset (e.g., 5.5 for IST). If you want auto TZ from place, add a geocoder/timezone lookup.
+Notes:
+- Language auto-detection tries (in order): query param ?lang=, browser-sent lang via query param, IP geolocation.
+- No cookies or persistent storage are used; manual language selection in sidebar overrides detection for the session.
 """
 
 import math
 import json
-import csv
+import requests
 from io import BytesIO
 from datetime import datetime, timedelta, date, time as dtime
 
@@ -31,315 +26,472 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import swisseph as swe
 
-# ----------------------------- Constants -----------------------------
-SIGNS = [
-    "Aries","Taurus","Gemini","Cancer","Leo","Virgo",
-    "Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"
-]
+# Optional utilities
+try:
+    from timezonefinder import TimezoneFinder
+    import pytz
+    TZ_AVAILABLE = True
+except Exception:
+    TZ_AVAILABLE = False
 
-SIGN_GLYPHS = [
-    "\u2648","\u2649","\u264A","\u264B","\u264C","\u264D",
-    "\u264E","\u264F","\u2650","\u2651","\u2652","\u2653"
-]
+try:
+    from geopy.geocoders import Nominatim
+    GEO_AVAILABLE = True
+except Exception:
+    GEO_AVAILABLE = False
 
-PLANETS = [
-    ("Sun", swe.SUN, "\u2609"),
-    ("Moon", swe.MOON, "\u263D"),
-    ("Mercury", swe.MERCURY, "\u263F"),
-    ("Venus", swe.VENUS, "\u2640"),
-    ("Mars", swe.MARS, "\u2642"),
-    ("Jupiter", swe.JUPITER, "\u2643"),
-    ("Saturn", swe.SATURN, "\u2644"),
-    ("Uranus", swe.URANUS, "\u2645"),
-    ("Neptune", swe.NEPTUNE, "\u2646"),
-    ("Pluto", swe.PLUTO, "\u2647"),
-]
-
-DEFAULT_ASPECTS = [
-    ("Conjunction", 0,   8, "#6b7280", 1.6),  # gray
-    ("Sextile",     60,  4, "#10b981", 1.6),  # green
-    ("Square",      90,  6, "#ef4444", 1.8),  # red
-    ("Trine",       120, 6, "#3b82f6", 1.8),  # blue
-    ("Opposition",  180, 8, "#8b5cf6", 1.8),  # purple
-]
-
-HOUSE_SYSTEMS = {
-    "Whole Sign": b"W",
-    "Placidus": b"P",
-    "Equal": b"E",
+# -------------------- Translations --------------------
+translations = {
+    'en': {
+        'app_title': 'AstroCanvas — Maharashtra Edition',
+        'subtitle': 'Maharashtra-first Vedic Kundali with multilingual support',
+        'birth_data': 'Birth data',
+        'lookup_city': 'Lookup by city (optional)',
+        'city_input': 'City / Place name (e.g., Mumbai, India)',
+        'birth_date': 'Birth Date',
+        'birth_time': 'Birth Time (local)',
+        'latitude': 'Latitude (°)',
+        'longitude': 'Longitude (°)',
+        'auto_tz': 'Auto-detect timezone',
+        'tz_input': 'Timezone offset (hours)',
+        'mode': 'Display mode',
+        'mode_options': ['Maharashtra (North Kundali)','South Indian','Western (Tropical)'],
+        'translit': 'Show Devanagari labels',
+        'generate': 'Generate Kundali',
+        'kundali': 'Kundali',
+        'panchang': 'Panchang',
+        'tithi': 'Tithi',
+        'nakshatra': 'Nakshatra',
+        'yoga': 'Yoga',
+        'karana': 'Karana',
+        'vimshottari': 'Vimshottari Mahadasha',
+        'positions': 'Planetary positions',
+        'download_png': 'Download Kundali PNG',
+        'info_fill': 'Fill inputs in the sidebar and click Generate Kundali',
+        'tz_auto_msg': 'Auto TZ: {tzname} (offset {tz} h)',
+        'not_found': 'Location not found.',
+        'geocode_err': 'Geocoding error: {err}',
+        'panchang_na': 'Panchang could not be computed.'
+    },
+    'mr': {
+        'app_title': 'AstroCanvas — महाराष्ट्र आवृत्ती',
+        'subtitle': 'मराठी-प्राधान्य विकेतिक कौंडली आणि बहुभाषिक समर्थन',
+        'birth_data': 'जन्म माहिती',
+        'lookup_city': 'शहराने शोधा (ऐच्छिक)',
+        'city_input': 'शहर / ठिकाण (उदा. मुंबई, भारत)',
+        'birth_date': 'जन्माची तारीख',
+        'birth_time': 'जन्माची वेळ (स्थानिक)',
+        'latitude': 'अक्षांश (Latitude)',
+        'longitude': 'रेखांश (Longitude)',
+        'auto_tz': 'टाईमझोन आपोआप शोधा',
+        'tz_input': 'टाईमझोन ऑफसेट (तास)',
+        'mode': 'प्रदर्शन पद्धत',
+        'mode_options': ['महाराष्ट्र (North Kundali)','दक्षिण भारतीय','पाश्चात्य (Tropical)'],
+        'translit': 'देवनागरी लेबल दाखवा',
+        'generate': 'कौंडली तयार करा',
+        'kundali': 'कौंडली',
+        'panchang': 'पंचांग',
+        'tithi': 'तिठी',
+        'nakshatra': 'नक्षत्र',
+        'yoga': 'योग',
+        'karana': 'करण',
+        'vimshottari': 'विम्शोत्तरी महासंहिता',
+        'positions': "ग्रहांची स्थिती",
+        'download_png': 'कौंडली PNG डाउनलोड करा',
+        'info_fill': 'साइडबार मधून माहिती भरा आणि "कौंडली तयार करा" क्लिक करा',
+        'tz_auto_msg': 'ऑटो TZ: {tzname} (ऑफसेट {tz} तास)',
+        'not_found': 'स्थळ सापडले नाही.',
+        'geocode_err': 'Geocoding त्रुटी: {err}',
+        'panchang_na': 'पंचांग मोजता आले नाही.'
+    },
+    'hi': {
+        'app_title': 'AstroCanvas — महाराष्ट्र संस्करण',
+        'subtitle': 'महाराष्ट्र-प्राथमिक वैदिक कुंडली और बहुभाषी समर्थन',
+        'birth_data': 'जन्म जानकारी',
+        'lookup_city': 'शहर से खोजें (वैकल्पिक)',
+        'city_input': 'शहर / स्थान (उदा. मुंबई, भारत)',
+        'birth_date': 'जन्म तारीख',
+        'birth_time': 'जन्म समय (स्थानीय)',
+        'latitude': 'अक्षांश (Latitude)',
+        'longitude': 'रेखांश (Longitude)',
+        'auto_tz': 'टाइमज़ोन स्वचालित रूप से खोजें',
+        'tz_input': 'टाइमज़ोन ऑफसेट (घंटे)',
+        'mode': 'प्रदर्शन मोड',
+        'mode_options': ['महाराष्ट्र (North Kundali)','दक्षिण भारतीय','पश्चिमी (Tropical)'],
+        'translit': 'देवनागरी लेबल दिखाएं',
+        'generate': 'कुंडली बनाएं',
+        'kundali': 'कुंडली',
+        'panchang': 'पंचांग',
+        'tithi': 'तिथि',
+        'nakshatra': 'नक्षत्र',
+        'yoga': 'योग',
+        'karana': 'करण',
+        'vimshottari': 'विम्शोत्तरी महामहादशा',
+        'positions': 'ग्रह स्थिति',
+        'download_png': 'कुंडली PNG डाउनलोड करें',
+        'info_fill': 'साइडबार में जानकारी भरें और "कुंडली बनाएं" पर क्लिक करें',
+        'tz_auto_msg': 'ऑटो TZ: {tzname} (ऑफसेट {tz} घँटे)',
+        'not_found': 'स्थान नहीं मिला।',
+        'geocode_err': 'Geocoding त्रुटि: {err}',
+        'panchang_na': 'पंचांग की गणना नहीं हो सकी.'
+    }
 }
 
-# ----------------------------- Helpers -----------------------------
+# -------------------- Marathi / Devanagari helpers --------------------
+DEV_NUM = {0:'०',1:'१',2:'२',3:'३',4:'४',5:'५',6:'६',7:'७',8:'८',9:'९'}
 
-def normalize(lon: float) -> float:
+def to_devanagari_num(n):
+    s = str(n)
+    return ''.join(DEV_NUM.get(int(ch), ch) for ch in s)
+
+MAR_PLANET_SHORT = {
+    'Sun':'सूर्य','Moon':'चं','Mercury':'बुध','Venus':'शुक्र','Mars':'मं','Jupiter':'गुरु','Saturn':'शनि','Rahu':'राहु','Ketu':'केतु'
+}
+
+MAR_TITHI = [
+    'शुक्ल प्रतिपदा','शुक्ल द्वितीया','शुक्ल तृतीया','शुक्ल चतुर्थी','शुक्ल पंचमी','शुक्ल षष्ठी','शुक्ल सप्तमी','शुक्ल अष्टमी','शुक्ल नवमी','शुक्ल दशमी',
+    'शुक्ल एकादशी','शुक्ल द्वादशी','शुक्ल त्रयोदशी','शुक्ल चतुर्दशी','पुर्णिमा/अमावास्या','कृष्ण प्रतिपदा','कृष्ण द्वितीया','कृष्ण तृतीया','कृष्ण चतुर्थी','कृष्ण पंचमी',
+    'कृष्ण षष्ठी','कृष्ण सप्तमी','कृष्ण अष्टमी','कृष्ण नवमी','कृष्ण दशमी','कृष्ण एकादशी','कृष्ण द्वादशी','कृष्ण त्रयोदशी','कृष्ण चतुर्दशी','अमावास्या/पुर्णिमा'
+]
+
+MAR_NAK = [
+    'अश्विनी','भरणी','कृत्तिका','रोहिणी','मृगशीर्ष','आर्द्रा','पुनर्वसु','पुष्य','आश्लेषा','मघा','पूर्व फाल्गुनी','उत्तर फाल्गुनी','हस्त','चित्रा','स्वाती','विशाखा',
+    'अनुराधा','ज्येष्ठा','मूल','पूर्वाषाढा','उत्तराषाढा','श्रवण','धनिष्ठा','शतभिषा','पूर्वभाद्रपदा','उत्तरभाद्रपदा','रेवती'
+]
+
+# -------------------- Astrological constants --------------------
+SIGNS_EN = ['Aries','Taurus','Gemini','Cancer','Leo','Virgo','Libra','Scorpio','Sagittarius','Capricorn','Aquarius','Pisces']
+SIGNS_DEV = ['मेष','वृषभ','मिथुन','कर्क','सिंह','कन्या','तुला','वृश्चिक','धनु','मकर','कुंभ','मीन']
+
+VIM_DASHA_ORDER = ['Ketu','Venus','Sun','Moon','Mars','Rahu','Jupiter','Saturn','Mercury']
+VIM_DASHA_YEARS = {'Ketu':7,'Venus':20,'Sun':6,'Moon':10,'Mars':7,'Rahu':18,'Jupiter':16,'Saturn':19,'Mercury':17}
+
+# -------------------- Helpers --------------------
+def normalize(lon):
     return lon % 360.0
 
-
-def sign_index(lon: float) -> int:
+def sign_index(lon):
     return int((lon % 360.0) // 30)
 
+def dms(angle):
+    angle = normalize(angle)
+    deg = int(angle)
+    rem = (angle - deg) * 60
+    minute = int(rem)
+    second = int((rem - minute) * 60)
+    return deg, minute, second
 
-def lon_in_sign(lon: float):
-    lon = lon % 360.0
-    idx = sign_index(lon)
-    deg_in_sign = lon - 30 * idx
-    d = int(deg_in_sign)
-    m = int((deg_in_sign - d) * 60)
-    return SIGNS[idx], d, m
+# -------------------- Ayanamsa --------------------
+def get_lahiri_ayanamsa(jd_ut):
+    try:
+        a = swe.get_ayanamsa_ut(jd_ut)
+        return a / 3600.0
+    except Exception:
+        try:
+            a = swe.get_ayanamsa(jd_ut)
+            return a
+        except Exception:
+            return 0.0
 
-
-def min_angle(a: float, b: float) -> float:
-    return abs((a - b + 180) % 360 - 180)
-
-
-def angle_to_xy(angle_deg: float, radius: float, asc_deg: float):
-    theta = math.radians((angle_deg - asc_deg + 180) % 360)
-    return radius * math.cos(theta), radius * math.sin(theta)
-
-
-# ------------------------- Core Ephemeris Logic -------------------------
-
-def compute_chart(date_str: str, time_str: str, tz_hours: float, lat: float, lon: float,
-                  house_system_code: bytes = b"W", use_moshier: bool = True):
-    flags = swe.FLG_MOSEPH if use_moshier else swe.FLG_SWIEPH
-
+# -------------------- Compute positions --------------------
+def compute_chart(date_str, time_str, tz_hours, lat, lon, sidereal=True, topo=True):
     dt_local = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
     dt_ut = dt_local - timedelta(hours=tz_hours)
-    jd_ut = swe.julday(
-        dt_ut.year, dt_ut.month, dt_ut.day,
-        dt_ut.hour + dt_ut.minute/60.0 + dt_ut.second/3600.0, swe.GREG_CAL
-    )
+    jd_ut = swe.julday(dt_ut.year, dt_ut.month, dt_ut.day, dt_ut.hour + dt_ut.minute/60.0, swe.GREG_CAL)
 
-    positions = {}
-    speeds = {}
-    for name, pid, _ in PLANETS:
-        xx, _ = swe.calc_ut(jd_ut, pid, flags)
-        lon_ecl = normalize(xx[0])
-        positions[name] = lon_ecl
-        speeds[name] = xx[3]  # longitude speed; retrograde if negative
+    if topo:
+        swe.set_topo(lon, lat, 0)
 
-    ascmc, cusps = swe.houses(jd_ut, lat, lon, house_system_code)
-    asc = normalize(ascmc[0])
-    mc = normalize(ascmc[1])
+    flags = swe.FLG_SWIEPH | swe.FLG_TOPOCTR
 
-    # Whole Sign cusp handling (override cusps to whole signs from Asc sign)
-    if house_system_code == b"W":
-        asc_sign = sign_index(asc)
-        ws_cusps = [(30 * ((asc_sign + i) % 12)) for i in range(12)]
-    else:
-        # Use system cusps from Swiss Ephemeris
-        ws_cusps = [normalize(c) for c in cusps]
+    bodies = [("Sun",swe.SUN),("Moon",swe.MOON),("Mercury",swe.MERCURY),("Venus",swe.VENUS),("Mars",swe.MARS),("Jupiter",swe.JUPITER),("Saturn",swe.SATURN)]
+    pos = {}
+    speed = {}
+    ay = get_lahiri_ayanamsa(jd_ut) if sidereal else 0.0
 
-    return {
-        "jd_ut": jd_ut,
-        "dt_ut": dt_ut.isoformat(),
-        "positions": positions,
-        "speeds": speeds,
-        "asc": asc,
-        "mc": mc,
-        "cusps": ws_cusps,
-    }
+    for name,bid in bodies:
+        xx, serr = swe.calc_ut(jd_ut, bid, flags)
+        lon_val = normalize(xx[0] - (ay if sidereal else 0.0))
+        pos[name] = lon_val
+        speed[name] = xx[3]
+
+    # Nodes
+    try:
+        rn, serr = swe.calc_ut(jd_ut, swe.TRUE_NODE, flags)
+        rn_lon = normalize(rn[0] - (ay if sidereal else 0.0))
+        kn_lon = normalize(rn_lon + 180)
+        pos['Rahu'] = rn_lon
+        pos['Ketu'] = kn_lon
+    except Exception:
+        pos['Rahu'] = None
+        pos['Ketu'] = None
+
+    # Ascendant (whole sign for simple kundali mapping)
+    try:
+        ascmc, cusps = swe.houses(jd_ut, lat, lon, b'W')
+        asc = normalize(ascmc[0] - (ay if sidereal else 0.0))
+        mc = normalize(ascmc[1] - (ay if sidereal else 0.0))
+    except Exception:
+        asc, mc = None, None
+
+    return {'jd_ut': jd_ut, 'dt_ut': dt_ut.isoformat(), 'positions':pos, 'speeds':speed, 'asc':asc, 'mc':mc}
+
+# -------------------- Panchang & Vimshottari --------------------
+def compute_panchang(pos):
+    sun = pos.get('Sun')
+    moon = pos.get('Moon')
+    if sun is None or moon is None:
+        return None
+    diff = normalize(moon - sun)
+    tithi_index = int(diff // 12)
+
+    nak_index = int(moon // (360.0/27.0))
+
+    yoga_val = normalize(sun + moon)
+    yoga_index = int(yoga_val // (360.0/27.0))
+
+    karana_index = (tithi_index * 2) % 11
+
+    return {'tithi_idx':tithi_index, 'tithi_mar':MAR_TITHI[tithi_index], 'nak_idx':nak_index, 'nak_mar':MAR_NAK[nak_index], 'yoga_idx':yoga_index, 'karana_idx':karana_index}
 
 
-def build_aspects(positions: dict, aspects_def: list):
-    keys = [name for (name, _, _) in PLANETS]
-    found = []
-    for i in range(len(keys)):
-        for j in range(i + 1, len(keys)):
-            p1, p2 = keys[i], keys[j]
-            d = min_angle(positions[p1], positions[p2])
-            for aname, aangle, orb, color, lw in aspects_def:
-                if abs(d - aangle) <= orb:
-                    found.append({
-                        "p1": p1, "p2": p2,
-                        "sep": d, "aspect": aname,
-                        "color": color, "lw": lw
-                    })
-    return found
+def vimshottari(pos):
+    moon_lon = pos.get('Moon')
+    if moon_lon is None:
+        return None
+    nak_index = int(moon_lon // (360.0/27.0))
+    order = VIM_DASHA_ORDER
+    mapping = [order[i%9] for i in range(27)]
+    start_lord = mapping[nak_index]
+    nak_deg = moon_lon % (360.0/27.0)
+    frac = nak_deg / (360.0/27.0)
+    total_years = VIM_DASHA_YEARS[start_lord]
+    balance = (1 - frac) * total_years
+    seq = [{'lord':start_lord, 'years':balance, 'from_now':0.0}]
+    idx0 = order.index(start_lord)
+    running = balance
+    for i in range(1,9):
+        lord = order[(idx0 + i) % 9]
+        years = VIM_DASHA_YEARS[lord]
+        seq.append({'lord':lord, 'years':years, 'from_now':running})
+        running += years
+    return seq
 
+# -------------------- Maharashtra-specific Kundali drawing --------------------
 
-# ------------------------------ Drawing ------------------------------
+def draw_kundali_maharashtra(pos, asc, translit=True, highlight_mumbai=True):
+    """Draw a North-Indian diamond kundali with Marathi labels and Devanagari numerals for houses.
+    highlight_mumbai: if True, customize colors/icons used in Maharashtra style (subtle)
+    """
+    fig, ax = plt.subplots(figsize=(6,6))
+    ax.set_xlim(0,4)
+    ax.set_ylim(0,4)
+    ax.axis('off')
 
-def draw_chart(data: dict, aspects_def: list, show_aspects: bool = True,
-               mark_retrograde: bool = True) -> bytes:
-    pos = data["positions"]
-    asc = data["asc"]
-    mc = data["mc"]
-    cusps = data["cusps"]
-    speeds = data.get("speeds", {})
+    # Draw diamond
+    diamond = [(2,0),(4,2),(2,4),(0,2),(2,0)]
+    xs, ys = zip(*diamond)
+    ax.plot(xs, ys, color='#2b2b2b', lw=2)
 
-    R_outer = 1.00
-    R_signs = 1.07
-    R_plan = 0.78
-    R_aspect_inner = 0.15
+    # Compute sign centers around diamond (clockwise starting at top = Aries in North Indian)
+    sign_centers = []
+    for angle in [90,30,-30,-90,-150,-210,-270,-330,90,30,-30,-90][:12]:
+        rad = math.radians(angle)
+        x = 2 + 1.4 * math.cos(rad)
+        y = 2 + 1.4 * math.sin(rad)
+        sign_centers.append((x,y))
 
-    fig, ax = plt.subplots(figsize=(8.8, 8.8))
-    ax.set_aspect("equal")
-    ax.axis("off")
+    # Place Devanagari numerals for houses in Maharashtra convention (1-12 in Devanagari)
+    for i,(sx,sy) in enumerate(sign_centers):
+        house_num = to_devanagari_num(i+1)
+        ax.text(sx, sy+0.45, SIGNS_DEV[i], fontsize=12, ha='center', va='center', fontweight='bold')
+        ax.text(sx, sy+0.22, house_num, fontsize=11, ha='center', va='center', color='#6b7280')
 
-    circ_out = plt.Circle((0, 0), R_outer, fill=False, lw=2.0)
-    circ_in = plt.Circle((0, 0), R_plan, fill=False, lw=1.0, linestyle=":")
-    ax.add_artist(circ_out)
-    ax.add_artist(circ_in)
+    # Place planets (Marathi short names)
+    for name in ['Sun','Moon','Mercury','Venus','Mars','Jupiter','Saturn','Rahu','Ketu']:
+        lon = pos.get(name)
+        if lon is None:
+            continue
+        idx = sign_index(lon)
+        x,y = sign_centers[idx]
+        label = MAR_PLANET_SHORT.get(name, name if not translit else name)
+        # Color by benefic/malefic simplified
+        color = '#0b5394' if name in ['Sun','Moon','Venus','Jupiter','Mercury'] else '#b30000'
+        bbox = dict(facecolor='white', edgecolor=color, boxstyle='round', alpha=0.9)
+        ax.text(x, y-0.15, label, fontsize=12, ha='center', va='center', bbox=bbox)
 
-    # House/sign boundaries
-    for cusp in cusps:
-        x1, y1 = angle_to_xy(cusp, 0.0, asc)
-        x2, y2 = angle_to_xy(cusp, R_outer, asc)
-        ax.plot([x1, x2], [y1, y2], lw=1.1, color="#000000")
-
-    # Sign glyphs at house centers (works for Whole Sign and looks fine for others)
-    for cusp in cusps:
-        mid = (cusp + 15) % 360
-        xs, ys = angle_to_xy(mid, R_signs, asc)
-        ax.text(xs, ys, SIGN_GLYPHS[sign_index(cusp)], fontsize=18,
-                ha="center", va="center")
-
-    # Planet glyphs (mark retrograde as small "R" if enabled)
-    for (name, _, glyph) in PLANETS:
-        x, y = angle_to_xy(pos[name], R_plan, asc)
-        ax.text(x, y, glyph, fontsize=16, ha="center", va="center")
-        if mark_retrograde and speeds.get(name, 0) < 0:
-            ax.text(x, y - 0.05, "R", fontsize=8, ha="center", va="center")
-
-    # ASC & MC labels
-    x_asc, y_asc = angle_to_xy(asc, R_signs, asc)
-    ax.text(x_asc, y_asc, "ASC", fontsize=10, ha="center", va="center")
-
-    x_mc, y_mc = angle_to_xy(mc, R_signs, asc)
-    ax.text(x_mc, y_mc, "MC", fontsize=10, ha="center", va="center")
-
-    # Aspect lines
-    if show_aspects:
-        aspects = build_aspects(pos, aspects_def)
-        for a in aspects:
-            x1, y1 = angle_to_xy(pos[a["p1"]], R_plan - R_aspect_inner, asc)
-            x2, y2 = angle_to_xy(pos[a["p2"]], R_plan - R_aspect_inner, asc)
-            ax.plot([x1, x2], [y1, y2], color=a["color"], lw=a["lw"], alpha=0.9)
-
-        legend_items = []
-        for name, angle, _, color, lw in aspects_def:
-            legend_items.append(plt.Line2D([0], [0], color=color, lw=lw, label=name))
-        ax.legend(handles=legend_items, loc="upper center", bbox_to_anchor=(0.5, -0.05),
-                  ncol=3, frameon=False, fontsize=9)
-
+    # Title & footer
+    ax.set_title('आस्थ्रोकॅनव्हास — कौंडली (महाराष्ट्र शैली)', fontsize=13)
     buf = BytesIO()
-    fig.savefig(buf, format="png", dpi=300, bbox_inches="tight")
+    fig.savefig(buf, format='png', bbox_inches='tight', dpi=220)
     plt.close(fig)
     buf.seek(0)
     return buf.read()
 
+# -------------------- Language detection --------------------
 
-# ------------------------------ UI App ------------------------------
-st.set_page_config(page_title="Interactive Natal Chart", page_icon="🪐", layout="wide")
-st.title("🪐 Interactive Natal Chart Generator")
-st.caption("Whole Sign / Placidus wheel with aspects, retrograde markers, downloads.")
+def detect_language():
+    # 1) Query params (allow ?lang= to override/detect browser-based language)
+    q = st.experimental_get_query_params()
+    lang_param = q.get('lang', [None])[0]
+    if lang_param:
+        lang = lang_param.lower()
+        if lang.startswith('mr'):
+            return 'mr'
+        if lang.startswith('hi'):
+            return 'hi'
+        if lang.startswith('en'):
+            return 'en'
+    # 2) Try to use HTTP headers via Streamlit's _request_session (best-effort)
+    # Note: Streamlit doesn't expose headers reliably; skip.
+    # 3) IP-based geolocation fallback
+    try:
+        r = requests.get('https://ipapi.co/json/', timeout=3)
+        if r.status_code == 200:
+            info = r.json()
+            region = info.get('region', '').lower()
+            country = info.get('country_name', '')
+            # Maharashtra region names check
+            if 'maharashtra' in region or 'maharashtra' in info.get('region_code','').lower():
+                return 'mr'
+            if country == 'India':
+                # default to Hindi for India unless browser says otherwise
+                return 'hi'
+    except Exception:
+        pass
+    # Fallback default
+    return 'mr'
+
+# -------------------- Streamlit UI --------------------
+
+# Initial detection
+detected_lang = detect_language()
+# Session state: allow user override
+if 'lang' not in st.session_state:
+    st.session_state['lang'] = detected_lang
+
+# Sidebar language selector
+lang_labels = {'en': 'English', 'mr': 'मराठी', 'hi': 'हिन्दी'}
+sel = st.sidebar.selectbox('Language / भाषा', options=[lang_labels[k] for k in lang_labels], index=list(lang_labels.keys()).index(st.session_state['lang']))
+# Map back to code
+inv = {v:k for k,v in lang_labels.items()}
+st.session_state['lang'] = inv[sel]
+L = translations[st.session_state['lang']]
+
+# Page config and header
+st.set_page_config(page_title=L['app_title'], page_icon='🪔', layout='wide')
+st.title(L['app_title'])
+st.write(L['subtitle'])
 
 with st.sidebar:
-    st.header("Input")
-    colA, colB = st.columns(2)
-    with colA:
-        bdate: date = st.date_input("Birth Date", value=date(2005, 5, 22))
-    with colB:
-        btime: dtime = st.time_input("Birth Time", value=dtime(2, 6))
+    st.header(L['birth_data'])
+    use_city = st.checkbox(L['lookup_city'], value=False)
+    city_query = None
+    if use_city:
+        if not GEO_AVAILABLE:
+            st.warning(L['geocode_err'].format(err='geopy not installed'))
+            use_city = False
+        else:
+            city_query = st.text_input(L['city_input'])
 
-    tz = st.number_input("Timezone offset (hours)", value=5.5, step=0.25, help="e.g., 5.5 for IST")
-    lat = st.number_input("Latitude (N+ / S-)", value=26.45, format="%.6f")
-    lon = st.number_input("Longitude (E+ / W-)", value=80.33, format="%.6f")
-
-    house_label = st.selectbox("House System", list(HOUSE_SYSTEMS.keys()), index=0)
-    use_moshier = st.checkbox("Use Moshier Ephemeris", value=True)
-
-    st.header("Aspects & Options")
-    show_aspects = st.checkbox("Show Aspects", value=True)
-    mark_retro = st.checkbox("Mark Retrograde", value=True)
-
-    # Custom orbs per aspect
-    st.subheader("Orbs (degrees)")
-    orb_conj = st.slider("Conjunction", 0.0, 12.0, 8.0, 0.5)
-    orb_sext = st.slider("Sextile", 0.0, 10.0, 4.0, 0.5)
-    orb_sqr  = st.slider("Square", 0.0, 10.0, 6.0, 0.5)
-    orb_tri  = st.slider("Trine", 0.0, 10.0, 6.0, 0.5)
-    orb_opp  = st.slider("Opposition", 0.0, 12.0, 8.0, 0.5)
-
-    generate = st.button("Generate Chart", use_container_width=True)
-
-# Compute on demand
-if generate:
-    date_str = bdate.strftime("%Y-%m-%d")
-    time_str = btime.strftime("%H:%M")
-
-    aspects_def = [
-        ("Conjunction", 0,   orb_conj, "#6b7280", 1.6),
-        ("Sextile",     60,  orb_sext, "#10b981", 1.6),
-        ("Square",      90,  orb_sqr,  "#ef4444", 1.8),
-        ("Trine",       120, orb_tri,  "#3b82f6", 1.8),
-        ("Opposition",  180, orb_opp,  "#8b5cf6", 1.8),
-    ]
-
-    data = compute_chart(
-        date_str=date_str,
-        time_str=time_str,
-        tz_hours=float(tz),
-        lat=float(lat),
-        lon=float(lon),
-        house_system_code=HOUSE_SYSTEMS[house_label],
-        use_moshier=use_moshier,
-    )
-
-    # Chart bytes
-    png_bytes = draw_chart(data, aspects_def, show_aspects=show_aspects, mark_retrograde=mark_retro)
-
-    # Build positions table
-    rows = []
-    for name, lon_deg in data["positions"].items():
-        s, d, m = lon_in_sign(lon_deg)
-        rows.append({
-            "Body": name,
-            "Longitude (°)": round(lon_deg, 6),
-            "Sign": s,
-            "Deg": d,
-            "Min": m,
-            "Retrograde": data["speeds"].get(name, 0) < 0,
-        })
-    df = pd.DataFrame(rows)
-
-    # Aspect list
-    aspect_list = build_aspects(data["positions"], aspects_def) if show_aspects else []
-    aspect_rows = [
-        {"Aspect": a["aspect"], "Body 1": a["p1"], "Body 2": a["p2"], "Separation (°)": round(a["sep"], 2)}
-        for a in aspect_list
-    ]
-    df_aspects = pd.DataFrame(aspect_rows)
-
-    # Layout
-    col1, col2 = st.columns([1.05, 0.95])
-
+    col1, col2 = st.columns(2)
     with col1:
-        st.subheader("Chart Wheel")
-        st.image(png_bytes, caption=f"ASC {data['asc']:.2f}°, MC {data['mc']:.2f}° | UT: {data['dt_ut']}", use_column_width=True)
-        st.download_button("Download Chart PNG", data=png_bytes, file_name="natal_chart.png", mime="image/png")
-
+        bdate: date = st.date_input(L['birth_date'], value=date(1990,1,1))
     with col2:
-        st.subheader("Planetary Positions")
-        st.dataframe(df, use_container_width=True)
+        btime: dtime = st.time_input(L['birth_time'], value=dtime(6,0))
 
-        # CSV & JSON downloads
-        csv_buf = df.to_csv(index=False).encode("utf-8")
-        st.download_button("Download Positions CSV", data=csv_buf, file_name="natal_positions.csv", mime="text/csv")
+    lat = st.number_input(L['latitude'], value=19.0760, format='%.6f')
+    lon = st.number_input(L['longitude'], value=72.8777, format='%.6f')
 
-        json_obj = {k: float(v) for k, v in data["positions"].items()}
-        json_bytes = json.dumps(json_obj, indent=2).encode("utf-8")
-        st.download_button("Download Positions JSON", data=json_bytes, file_name="natal_positions.json", mime="application/json")
-
-        if show_aspects:
-            st.subheader("Aspects Found")
-            if len(df_aspects) == 0:
-                st.info("No aspects found within the selected orbs.")
+    tz_auto = st.checkbox(L['auto_tz'], value=True)
+    tz = None
+    if tz_auto and TZ_AVAILABLE:
+        try:
+            tf = TimezoneFinder()
+            tzname = tf.timezone_at(lat=lat, lng=lon)
+            if tzname:
+                tz_obj = pytz.timezone(tzname)
+                local_dt = datetime.combine(bdate, btime)
+                loc_dt = tz_obj.localize(local_dt, is_dst=None)
+                tz = loc_dt.utcoffset().total_seconds() / 3600.0
+                st.sidebar.write(L['tz_auto_msg'].format(tzname=tzname, tz=tz))
             else:
-                st.dataframe(df_aspects, use_container_width=True)
+                tz = st.number_input(L['tz_input'], value=5.5, step=0.25)
+        except Exception:
+            tz = st.number_input(L['tz_input'], value=5.5, step=0.25)
+    else:
+        tz = st.number_input(L['tz_input'], value=5.5, step=0.25)
 
-    # Footer info
-    st.caption(f"Julian Day (UT): {data['jd_ut']:.5f} | House system: {house_label}")
+    st.header(L['mode'])
+    mode = st.selectbox('', options=L['mode_options'])
+    translit = st.checkbox(L['translit'], value=True)
+    st.markdown('---')
+    generate = st.button(L['generate'])
+
+# Geocode city if requested
+if use_city and city_query and GEO_AVAILABLE:
+    geolocator = Nominatim(user_agent='astrocanvas_geo')
+    try:
+        loc = geolocator.geocode(city_query, timeout=10)
+        if loc:
+            lat, lon = round(loc.latitude,6), round(loc.longitude,6)
+            st.sidebar.success(f"Found: {loc.address} -> ({lat}, {lon})")
+        else:
+            st.sidebar.error(L['not_found'])
+    except Exception as e:
+        st.sidebar.error(L['geocode_err'].format(err=e))
+
+if generate:
+    sidereal = not mode.startswith('Western') and not mode.startswith('पाश्चात्य')
+    data = compute_chart(bdate.strftime('%Y-%m-%d'), btime.strftime('%H:%M'), float(tz), float(lat), float(lon), sidereal=sidereal)
+
+    kundali_png = draw_kundali_maharashtra(data['positions'], data['asc'], translit=translit)
+
+    panch = compute_panchang(data['positions'])
+    dasha = vimshottari(data['positions']) if sidereal else None
+
+    c1, c2 = st.columns([1.1, 0.9])
+    with c1:
+        st.subheader(L['kundali'])
+        st.image(kundali_png, use_column_width=True)
+        st.download_button(L['download_png'], data=kundali_png, file_name='kundali_maharashtra.png', mime='image/png')
+    with c2:
+        st.subheader(L['panchang'])
+        if panch:
+            st.write(f"{L['tithi']}: {panch['tithi_mar']} (index {panch['tithi_idx']})")
+            st.write(f"{L['nakshatra']}: {panch['nak_mar']} (index {panch['nak_idx']})")
+            st.write(f"{L['yoga']}: index {panch['yoga_idx']}")
+            st.write(f"{L['karana']}: index {panch['karana_idx']}")
+        else:
+            st.info(L['panchang_na'])
+
+        st.markdown('---')
+        st.subheader(L['vimshottari'])
+        if dasha is None:
+            st.info(L['panchang_na'])
+        else:
+            for entry in dasha:
+                st.write(f"{entry['lord']}: {entry['years']:.3f} years (from {entry['from_now']:.3f})")
+
+    # Planetary positions table
+    rows = []
+    for k,v in data['positions'].items():
+        if v is None:
+            continue
+        deg, minute, second = dms(v)
+        sign_en = SIGNS_EN[sign_index(v)]
+        sign_dev = SIGNS_DEV[sign_index(v)]
+        name_dev = MAR_PLANET_SHORT.get(k, k)
+        rows.append({'Body_En':k, 'Body_Mar':name_dev, 'Longitude':round(v,6), 'Sign_En':sign_en, 'Sign_Mar':sign_dev, 'Deg':deg, 'Min':minute, 'Sec':second})
+    df = pd.DataFrame(rows)
+    st.subheader(L['positions'])
+    if translit and st.session_state['lang'] in ['mr','hi']:
+        st.dataframe(df[['Body_Mar','Longitude','Sign_Mar','Deg','Min','Sec']])
+    else:
+        st.dataframe(df[['Body_En','Longitude','Sign_En','Deg','Min','Sec']])
+
+    st.caption(f"UTC: {data['dt_ut']} | Ayanamsa (deg): {get_lahiri_ayanamsa(data['jd_ut']):.6f}")
 else:
-    st.info("Set your inputs on the left and click **Generate Chart**.")
+    st.info(L['info_fill'])
+
+# -------------------- End --------------------
